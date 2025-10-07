@@ -31,6 +31,7 @@ resource "random_id" "suffix" {
 # -----------------------------
 resource "aws_s3_bucket" "images" {
   bucket = "${local.name_prefix}-images-${random_id.suffix.hex}"
+  acl    = "private"
 
   force_destroy = true
 
@@ -62,7 +63,7 @@ resource "aws_s3_bucket_policy" "images_policy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "AllowCloudFrontServicePrincipalReadOnly"
+        Sid = "AllowCloudFrontServicePrincipalReadOnly"
         Effect = "Allow"
         Principal = {
           AWS = aws_cloudfront_origin_access_identity.oai.iam_arn
@@ -114,96 +115,93 @@ resource "aws_dynamodb_table" "metadata" {
 # IAM role & policy for Lambda
 # -----------------------------
 resource "aws_iam_role" "lambda_role" {
-  name = "${var.project_prefix}-${var.env}-lambda-role"
+  name = "${local.name_prefix}-lambda-role"
 
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version = "2012-10-17",
     Statement = [
       {
-        Effect = "Allow"
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
         Principal = {
           Service = "lambda.amazonaws.com"
         }
-        Action = "sts:AssumeRole"
       }
     ]
   })
 }
 
 resource "aws_iam_role_policy" "lambda_policy" {
-  name = "${var.project_prefix}-${var.env}-lambda-policy"
+  name = "${local.name_prefix}-lambda-policy"
   role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
-    Version = "2012-10-17"
+    Version = "2012-10-17",
     Statement = [
       {
-        Effect = "Allow"
+        Effect = "Allow",
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents"
-        ]
+        ],
         Resource = "arn:aws:logs:*:*:*"
       },
       {
-        Effect = "Allow"
+        Effect = "Allow",
         Action = [
           "s3:GetObject",
           "s3:PutObject",
           "s3:ListBucket"
-        ]
+        ],
         Resource = [
           aws_s3_bucket.images.arn,
           "${aws_s3_bucket.images.arn}/*"
         ]
       },
       {
-        Effect = "Allow"
+        Effect = "Allow",
         Action = [
           "dynamodb:PutItem",
           "dynamodb:UpdateItem",
           "dynamodb:GetItem"
-        ]
+        ],
         Resource = aws_dynamodb_table.metadata.arn
       },
       {
-        Effect = "Allow"
+        Effect = "Allow",
         Action = [
           "sns:Publish"
-        ]
+        ],
         Resource = aws_sns_topic.thumbnail_topic.arn
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes"
-        ]
-        Resource = aws_sqs_queue.image_queue.arn
       }
     ]
   })
 }
 
 # -----------------------------
-# Lambda packaging (archive the local lambda/processor.py)
+# Lambda function (worker)
 # -----------------------------
+# Write the lambda source code to a local file (processor.py) using the local_file resource.
+resource "local_file" "lambda_source" {
+  content  = file("${path.module}/lambda/processor.py")
+  filename = "${path.module}/lambda/processor.py" # ensures file exists when archiving
+}
+
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_file = "${path.module}/lambda/processor.py"
+  source_file = ["${path.module}/lambda/processor.py"]
   output_path = "${path.module}/lambda/processor.zip"
 }
 
 resource "aws_lambda_function" "processor" {
-  function_name    = "${local.name_prefix}-processor"
-  filename         = data.archive_file.lambda_zip.output_path
+  function_name = "${local.name_prefix}-processor"
+  filename      = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  handler          = "processor.lambda_handler"
-  runtime          = "python3.9"
-  role             = aws_iam_role.lambda_role.arn
-  timeout          = 120
+  handler       = "processor.lambda_handler"
+  runtime       = "python3.9"
+  role          = aws_iam_role.lambda_role.arn
+  timeout       = 120
 
   environment {
     variables = {
@@ -222,12 +220,13 @@ resource "aws_lambda_event_source_mapping" "sqs_to_lambda" {
   batch_size       = 5
 }
 
-# Allow SNS to invoke lambda (optional)
+# Allow SNS to invoke lambda if you want (optional): not needed here, but keep for reference
 resource "aws_lambda_permission" "allow_sns" {
   statement_id  = "AllowExecutionFromSNS"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.processor.function_name
   principal     = "sns.amazonaws.com"
+  #source_arn    = aws_sns_topic.thumbnail_topic.arn
 }
 
 # -----------------------------
